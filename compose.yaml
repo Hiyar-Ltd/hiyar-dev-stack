@@ -1,0 +1,208 @@
+# Hiyar local development stack
+#
+# Usage:
+#   docker compose --profile minimal up -d        # postgres + redis only
+#   docker compose --profile notification up -d   # + pubsub, firestore, firebase
+#   docker compose --profile payment up -d        # + stripe, temporal
+#   docker compose --profile gcs up -d            # + GCS (fake-gcs-server)
+#   docker compose --profile gateway up -d        # + firebase auth
+#   docker compose --profile observability up -d  # + otel-collector, jaeger
+#   docker compose --profile full up -d           # everything
+#
+# See README.md for per-service quick-start, port table, and env var wiring.
+
+name: hiyar
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — postgis/postgis:16-3.4 (tsvector + PostGIS + pg_trgm for search)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgis/postgis:16-3.4
+    profiles: [minimal, notification, payment, gcs, gateway, full]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hiyar
+      POSTGRES_PASSWORD: hiyar
+      POSTGRES_DB: hiyar
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hiyar -d hiyar"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Redis — Cloud Memorystore proxy
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    profiles: [minimal, notification, payment, gcs, gateway, full]
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Cloud Pub/Sub emulator
+  # ---------------------------------------------------------------------------
+  pubsub:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    profiles: [notification, full]
+    restart: unless-stopped
+    command: >
+      gcloud beta emulators pubsub start
+      --project=hiyar-local
+      --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+    environment:
+      PUBSUB_PROJECT_ID: hiyar-local
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8085/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Cloud Firestore emulator (supports named databases via --database flag)
+  # One emulator instance serves all named databases (notification-service, messaging-service).
+  # ---------------------------------------------------------------------------
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    profiles: [notification, full]
+    restart: unless-stopped
+    command: >
+      gcloud emulators firestore start
+      --project=hiyar-local
+      --host-port=0.0.0.0:8088
+    ports:
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8088/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Cloud Storage — fake-gcs-server (V4 signed URL support since v1.45)
+  # ---------------------------------------------------------------------------
+  gcs:
+    image: fsouza/fake-gcs-server:latest
+    profiles: [gcs, full]
+    restart: unless-stopped
+    command: ["-scheme", "http", "-public-host", "localhost:4443"]
+    ports:
+      - "4443:4443"
+    volumes:
+      - gcs_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4443/storage/v1/b || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Temporal — temporalio/auto-setup bootstraps with SQLite
+  # ---------------------------------------------------------------------------
+  temporal:
+    image: temporalio/auto-setup:1.24
+    profiles: [payment, full]
+    restart: unless-stopped
+    environment:
+      DB: sqlite
+      TEMPORAL_ADDRESS: "0.0.0.0:7233"
+    ports:
+      - "7233:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "tctl cluster health 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    profiles: [payment, full]
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "8233:8080"
+    depends_on:
+      temporal:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Stripe Mock — stateless OpenAPI-driven stub
+  # ---------------------------------------------------------------------------
+  stripe-mock:
+    image: stripe/stripe-mock:latest
+    profiles: [payment, full]
+    restart: unless-stopped
+    ports:
+      - "12111:12111"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:12111/v1/ -H 'Authorization: Bearer sk_test_x' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Firebase Auth emulator
+  # ---------------------------------------------------------------------------
+  firebase:
+    image: andreysenov/firebase-tools:latest
+    profiles: [gateway, notification, full]
+    restart: unless-stopped
+    command: >
+      firebase emulators:start
+      --only auth
+      --project hiyar-local
+    ports:
+      - "9099:9099"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9099/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # OpenTelemetry Collector
+  # ---------------------------------------------------------------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    profiles: [observability, full]
+    restart: unless-stopped
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "9090:9090"   # Prometheus metrics (scrape target)
+
+  # ---------------------------------------------------------------------------
+  # Jaeger — trace UI (receives from otel-collector)
+  # ---------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    profiles: [observability, full]
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI
+      - "14250:14250"  # gRPC from collector
+
+volumes:
+  postgres_data:
+  gcs_data:
