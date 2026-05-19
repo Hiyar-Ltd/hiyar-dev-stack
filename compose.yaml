@@ -20,6 +20,7 @@ services:
   # ---------------------------------------------------------------------------
   postgres:
     image: postgis/postgis:16-3.4
+    platform: linux/amd64   # no arm64 image published for this tag
     profiles: [minimal, notification, payment, gcs, gateway, full]
     restart: unless-stopped
     environment:
@@ -57,6 +58,7 @@ services:
   # ---------------------------------------------------------------------------
   pubsub:
     image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    platform: linux/amd64   # no arm64 image published for the emulators tag
     profiles: [notification, full]
     restart: unless-stopped
     command: >
@@ -79,6 +81,7 @@ services:
   # ---------------------------------------------------------------------------
   firestore:
     image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
+    platform: linux/amd64   # no arm64 image published for the emulators tag
     profiles: [notification, full]
     restart: unless-stopped
     command: >
@@ -106,7 +109,7 @@ services:
     volumes:
       - gcs_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:4443/storage/v1/b || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:4443/storage/v1/b || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10
