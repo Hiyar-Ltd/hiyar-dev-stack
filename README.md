@@ -19,13 +19,19 @@ Docker Compose stack for Hiyar local development. Starts emulators and stubs for
 ```bash
 git clone git@github.com:Hiyar-Ltd/hiyar-dev-stack.git
 cd hiyar-dev-stack
-cp .env.example .env
+cp .env.example .env   # includes COMPOSE_PROFILES=full
 
-# Start the services your repo needs (see profile table below)
-docker compose --profile minimal up -d
+# Start everything (default — no --profile flag needed after cp .env.example .env)
+docker compose up -d
 
 # Verify everything is healthy
 docker compose ps
+```
+
+To override for a single run without editing `.env`:
+
+```bash
+docker compose --profile minimal up -d
 ```
 
 ---
@@ -209,4 +215,4 @@ docker compose ps  # check "healthy" status
 ```
 
 **Temporal not starting:**
-`temporalio/auto-setup:1.24` with `DB=sqlite` requires ~20s. The temporal-ui service waits for the healthcheck automatically.
+`temporalio/auto-setup` runs schema migrations against postgres on first start — allow ~30s. The temporal-ui service waits for the healthcheck automatically.

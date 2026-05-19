@@ -23,10 +23,12 @@ Start only what a given service needs:
 | `observability` | otel-collector, jaeger |
 | `full` | everything |
 
+`.env.example` sets `COMPOSE_PROFILES=full`, so after `cp .env.example .env` the default is everything:
+
 ```bash
-docker compose --profile minimal up -d
-docker compose --profile full up -d
-docker compose down -v   # tear down + delete volumes
+docker compose up -d               # starts full profile (default via .env)
+docker compose --profile minimal up -d  # override for a single run
+docker compose down -v             # tear down + delete volumes
 ```
 
 ---
