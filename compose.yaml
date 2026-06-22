@@ -16,11 +16,11 @@ name: hiyar
 services:
 
   # ---------------------------------------------------------------------------
-  # PostgreSQL — postgis/postgis:16-3.4 (tsvector + PostGIS + pg_trgm for search)
+  # PostgreSQL — postgis/postgis:18-3.5 (tsvector + PostGIS + pg_trgm for search)
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgis/postgis:16-3.4
-    platform: linux/amd64   # no arm64 image published for this tag
+    image: postgis/postgis:18-3.5
+    platform: linux/amd64   # verify arm64 availability before removing
     profiles: [minimal, notification, payment, gcs, gateway, full]
     restart: unless-stopped
     environment:
