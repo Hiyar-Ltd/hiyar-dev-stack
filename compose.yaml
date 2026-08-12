@@ -7,9 +7,12 @@
 #   docker compose --profile gcs up -d            # + GCS (fake-gcs-server)
 #   docker compose --profile gateway up -d        # + firebase auth
 #   docker compose --profile observability up -d  # + otel-collector, jaeger
+#   docker compose --profile backend up -d        # + full Go backend (api-gateway + services)
 #   docker compose --profile full up -d           # everything
 #
 # See README.md for per-service quick-start, port table, and env var wiring.
+# See README.md "Full backend for client testing" for the backend profile's
+# prerequisites and known limitations before using it.
 
 name: hiyar
 
@@ -21,7 +24,7 @@ services:
   postgres:
     image: postgis/postgis:18-3.6-alpine
     platform: linux/amd64   # no arm64 image published for postgis/postgis
-    profiles: [minimal, notification, payment, gcs, gateway, full]
+    profiles: [minimal, notification, payment, gcs, gateway, backend, full]
     restart: unless-stopped
     environment:
       POSTGRES_USER: hiyar
@@ -43,7 +46,7 @@ services:
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
-    profiles: [minimal, notification, payment, gcs, gateway, full]
+    profiles: [minimal, notification, payment, gcs, gateway, backend, full]
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -59,7 +62,7 @@ services:
   pubsub:
     image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
     platform: linux/amd64   # no arm64 image published for the emulators tag
-    profiles: [notification, full]
+    profiles: [notification, backend, full]
     restart: unless-stopped
     command: >
       gcloud beta emulators pubsub start
@@ -82,7 +85,7 @@ services:
   firestore:
     image: gcr.io/google.com/cloudsdktool/cloud-sdk:emulators
     platform: linux/amd64   # no arm64 image published for the emulators tag
-    profiles: [notification, full]
+    profiles: [notification, backend, full]
     restart: unless-stopped
     command: >
       gcloud emulators firestore start
@@ -101,7 +104,7 @@ services:
   # ---------------------------------------------------------------------------
   gcs:
     image: fsouza/fake-gcs-server:latest
-    profiles: [gcs, full]
+    profiles: [gcs, backend, full]
     restart: unless-stopped
     command: ["-scheme", "http", "-public-host", "localhost:4443"]
     ports:
@@ -122,7 +125,7 @@ services:
   # ---------------------------------------------------------------------------
   temporal:
     image: temporalio/auto-setup:1.25.2
-    profiles: [payment, full]
+    profiles: [payment, backend, full]
     restart: unless-stopped
     environment:
       DB: postgres12
@@ -149,7 +152,7 @@ services:
 
   temporal-ui:
     image: temporalio/ui:latest
-    profiles: [payment, full]
+    profiles: [payment, backend, full]
     restart: unless-stopped
     environment:
       TEMPORAL_ADDRESS: temporal:7233
@@ -164,7 +167,7 @@ services:
   # ---------------------------------------------------------------------------
   stripe-mock:
     image: stripe/stripe-mock:latest
-    profiles: [payment, full]
+    profiles: [payment, backend, full]
     restart: unless-stopped
     ports:
       - "12111:12111"
@@ -184,7 +187,7 @@ services:
   # ---------------------------------------------------------------------------
   firebase:
     image: andreysenov/firebase-tools:latest
-    profiles: [gateway, notification, full]
+    profiles: [gateway, notification, backend, full]
     restart: unless-stopped
     command: >
       firebase --config /config/firebase.json
@@ -229,6 +232,463 @@ services:
     ports:
       - "16686:16686"  # UI
       - "14250:14250"  # gRPC from collector
+
+  # =============================================================================
+  # backend profile — full Hiyar Go backend for client (mobile/web) testing.
+  #
+  # See README.md "Full backend for client testing" for prerequisites:
+  #   - gcloud auth configure-docker (Artifact Registry pull auth)
+  #   - the DATABASE_URL/HIYAR_ENV=local fallback (thoughts/shared/plans/
+  #     2026-08-10-option2-database-url-fallback.md) is only in OPEN, UNMERGED
+  #     PRs as of this writing for the 9 SQL-backed services below (8 domain
+  #     services + outbox-relay) — they WILL crash-loop until those merge.
+  #   - risk-service/admin-service/known-limitation notes: see README.
+  #
+  # Per-service image tag/override vars (${SERVICE}_TAG / ${SERVICE}_IMAGE) let
+  # you pin a specific build; `docker compose --profile backend build <service>`
+  # builds from the sibling checkout instead of pulling.
+  # =============================================================================
+
+  api-gateway:
+    image: ${API_GATEWAY_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/api-gateway}:${API_GATEWAY_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-api-gateway
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      USER_SERVICE_URL: http://user-service:8080
+      LISTING_SERVICE_URL: http://listing-service:8080
+      SEARCH_SERVICE_URL: http://search-service:8080
+      BOOKING_SERVICE_URL: http://booking-service:8080
+      PAYMENT_SERVICE_URL: http://payment-service:8080
+      HANDOVER_SERVICE_URL: http://handover-service:8080
+      REVIEW_SERVICE_URL: http://review-service:8080
+      NOTIFICATION_SERVICE_URL: http://notification-service:8080
+      MESSAGING_SERVICE_URL: http://messaging-service:8080
+      MEDIA_SERVICE_URL: http://media-service:8080
+      RISK_SERVICE_URL: http://risk-service:8080
+      REDIS_ADDR: redis:6379
+      TEMPORAL_HOST_PORT: temporal:7233
+      MEDIA_BUCKET: hiyar-local-media
+      FIREBASE_AUTH_EMULATOR_HOST: firebase:9099
+      FIREBASE_PROJECT_ID: hiyar-local
+    depends_on:
+      - user-service
+      - listing-service
+      - search-service
+      - booking-service
+      - payment-service
+      - handover-service
+      - review-service
+      - notification-service
+      - media-service
+      - messaging-service
+      - risk-service
+
+  # --- SQL-backed services (Option 2: DATABASE_URL + HIYAR_ENV=local) --------
+  # CLOUD_SQL_INSTANCE/DB_USER/DB_NAME are deliberately OMITTED on all of these —
+  # setting them alongside DATABASE_URL is a FATAL error in dbconn.Open, not a
+  # fallback. See thoughts/shared/plans/2026-08-10-option2-database-url-fallback.md.
+
+  user-service:
+    image: ${USER_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/user-service}:${USER_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-user-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://user_svc:user_svc@postgres:5432/hiyar?sslmode=disable&search_path=users
+      REDIS_ADDR: redis:6379
+      GOOGLE_CLOUD_PROJECT: hiyar-local
+      JWT_SIGNING_KEY_PATH: /secrets/jwt-signing-key.pem
+      STRIPE_API_KEY_PATH: /secrets/stripe-api-key
+      STRIPE_WEBHOOK_SECRET_PATH: /secrets/stripe-webhook-secret
+      FIRESTORE_DB: user
+      FIRESTORE_EMULATOR_HOST: firestore:8088
+      LISTING_SERVICE_URL: http://listing-service:8080
+    volumes:
+      - ./secrets:/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      firestore:
+        condition: service_healthy
+
+  listing-service:
+    image: ${LISTING_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/listing-service}:${LISTING_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-listing-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8082:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://listing_svc:listing_svc@postgres:5432/hiyar?sslmode=disable&search_path=listings
+      GCS_BUCKET_MEDIA: hiyar-local-media
+      PUBSUB_PROJECT: hiyar-local
+      REDIS_ADDR: redis:6379
+      PAYMENT_SERVICE_URL: http://payment-service:8080
+      AI_SERVICE_URL: http://ai-service:8080
+      MEDIA_SERVICE_URL: http://media-service:8080
+      BOOKING_SERVICE_URL: http://booking-service:8080
+      RISK_SERVICE_URL: http://risk-service:8080
+      USER_SERVICE_URL: http://user-service:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  search-service:
+    image: ${SEARCH_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/search-service}:${SEARCH_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-search-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://search_svc:search_svc@postgres:5432/hiyar?sslmode=disable&search_path=search
+      GCP_PROJECT_ID: hiyar-local
+      CLOUD_RUN_URL: http://search-service:8080
+      REDIS_ADDR: redis:6379
+      AI_SERVICE_URL: http://ai-service:8080
+      ANALYTICS_TOPIC: analytics-events
+      PUSHER_SA_EMAIL: local-dev@hiyar-local.iam.gserviceaccount.com
+      SCHEDULER_SA_EMAIL: local-dev@hiyar-local.iam.gserviceaccount.com
+      GATEWAY_SA_EMAIL: local-dev@hiyar-local.iam.gserviceaccount.com
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  booking-service:
+    image: ${BOOKING_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/booking-service}:${BOOKING_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-booking-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8084:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://booking_svc:booking_svc@postgres:5432/hiyar?sslmode=disable&search_path=bookings
+      PAYMENT_SERVICE_URL: http://payment-service:8080
+      USER_SERVICE_URL: http://user-service:8080
+      LISTING_SERVICE_URL: http://listing-service:8080
+      TEMPORAL_HOST_PORT: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      REDIS_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      temporal:
+        condition: service_healthy
+
+  payment-service:
+    image: ${PAYMENT_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/payment-service}:${PAYMENT_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-payment-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8091:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://payment_svc:payment_svc@postgres:5432/hiyar?sslmode=disable&search_path=payments
+      GOOGLE_CLOUD_PROJECT: hiyar-local
+      STRIPE_LIVEMODE: "false"
+      PAYOUT_STUB: "true"
+      # STRIPE_SECRET_KEY_RESOURCE / STRIPE_WEBHOOK_SECRET_RESOURCE intentionally
+      # left UNSET: this repo's stripe-go client always targets the real Stripe
+      # API (no base-URL override exists in hiyar-payment-service to redirect to
+      # stripe-mock) — leaving both unset makes the service boot with payment
+      # RPC/webhook routes cleanly disabled (main.go logs this), rather than
+      # failing against api.stripe.com. Payment RPCs are NOT testable locally
+      # until hiyar-payment-service adds a stripe-mock-pointed base URL.
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  handover-service:
+    image: ${HANDOVER_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/handover-service}:${HANDOVER_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-handover-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8086:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://handover_svc:handover_svc@postgres:5432/hiyar?sslmode=disable&search_path=handovers
+      BOOKING_SERVICE_URL: http://booking-service:8080
+      EVIDENCE_BUCKET: hiyar-local-media
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  review-service:
+    image: ${REVIEW_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/review-service}:${REVIEW_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-review-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8087:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://review_svc:review_svc@postgres:5432/hiyar?sslmode=disable&search_path=reviews
+      BOOKING_SERVICE_URL: http://booking-service:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  risk-service:
+    image: ${RISK_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/risk-service}:${RISK_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-risk-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8093:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://risk_svc:risk_svc@postgres:5432/hiyar?sslmode=disable&search_path=risk
+      SERVICE_NAME: risk-service
+      PUBSUB_PROJECT: hiyar-local
+      LISTING_SERVICE_URL: http://listing-service:8080
+      AI_SERVICE_URL: http://ai-service:8080
+      MEDIA_SERVICE_URL: http://media-service:8080
+      ADMIN_AUDIENCE: admin-service  # dummy default; admin-service is excluded, this path isn't testable locally
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- Firestore-backed services ---------------------------------------------
+
+  messaging-service:
+    image: ${MESSAGING_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/messaging-service}:${MESSAGING_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-messaging-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8092:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      GCP_PROJECT_ID: hiyar-local
+      FIRESTORE_DATABASE: messaging
+      FIRESTORE_EMULATOR_HOST: firestore:8088
+      EXPECTED_AUDIENCE: http://messaging-service:8080   # dummy; only validates inbound OIDC tokens, which don't exist locally — gateway-header path unaffected
+      MEDIA_BUCKET: hiyar-local-media
+      MEDIA_SERVICE_URL: http://media-service:8080
+      AI_SERVICE_URL: http://ai-service:8080
+      MESSAGING_INTERNAL_CALLER_SA: temporal-worker-runtime@hiyar-local.iam.gserviceaccount.com  # dummy; internal RPCs from temporal-worker aren't reachable locally (OIDC limitation)
+      OTLP_ENDPOINT: http://otel-collector:4318
+    depends_on:
+      firestore:
+        condition: service_healthy
+      media-service:
+        condition: service_started
+      ai-service:
+        condition: service_started
+
+  notification-service:
+    image: ${NOTIFICATION_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/notification-service}:${NOTIFICATION_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-notification-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8089:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      GCP_PROJECT_ID: hiyar-local
+      FIRESTORE_DATABASE: notification
+      FIRESTORE_EMULATOR_HOST: firestore:8088
+      USER_SERVICE_ADDR: http://user-service:8080
+      # FCM_CREDENTIALS_JSON left unset: no Firebase Admin SDK JSON exists for the
+      # local emulator project; notification-service's fcm.MustFromJSON may fail
+      # or no-op depending on its own local-dev tolerance — not verified here.
+      EMAIL_PROVIDER_API_KEY: POSTMARK_API_TEST
+      EMAIL_FROM_ADDRESS: noreply@hiyar.com.au
+      PUBSUB_PUSHER_SA: local-dev@hiyar-local.iam.gserviceaccount.com
+      TEMPORAL_WORKER_SA: local-dev@hiyar-local.iam.gserviceaccount.com
+      OTLP_ENDPOINT: http://otel-collector:4318
+    depends_on:
+      firestore:
+        condition: service_healthy
+
+  # --- No-database services ---------------------------------------------------
+
+  ai-service:
+    image: ${AI_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/ai-service}:${AI_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-ai-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8094:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      GCS_PHOTOS_BUCKET: hiyar-local-media
+      # GEMINI_API_KEY has no local emulator — bring your own key via .env
+      # (GEMINI_API_KEY=...) to exercise real classification/screening locally.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+
+  media-service:
+    image: ${MEDIA_SERVICE_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/media-service}:${MEDIA_SERVICE_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-media-service
+    profiles: [backend, full]
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      GCS_BUCKET_MEDIA: hiyar-local-media
+      PUBSUB_PROJECT: hiyar-local
+      STORAGE_EMULATOR_HOST: http://gcs:4443
+    depends_on:
+      gcs:
+        condition: service_healthy
+
+  # --- Temporal worker ---------------------------------------------------------
+  # KNOWN LIMITATION: temporal-worker's s2sclient mints a real Google-signed OIDC
+  # token for every non-empty *_SERVICE_URL and FAILS FAST at startup if ADC/the
+  # metadata server is unavailable (see hiyar-temporal-worker/cmd/worker/main.go
+  # mustS2SClient). Local Docker has neither, so every downstream URL below is
+  # left EMPTY deliberately — the worker boots and registers workflows/activities,
+  # but any workflow that actually calls a downstream service will fail when that
+  # activity runs. This is the same gateway-bypassing-OIDC limitation documented
+  # elsewhere, just broader in scope for this service.
+  temporal-worker:
+    image: ${TEMPORAL_WORKER_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/temporal-worker}:${TEMPORAL_WORKER_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-temporal-worker
+    profiles: [backend, full]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      TEMPORAL_HOST_PORT: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      USE_SECRET_MANAGER: "false"
+      TEMPORAL_PAYLOAD_KEY: ${TEMPORAL_PAYLOAD_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      OTLP_ENDPOINT: http://otel-collector:4318
+      # PAYMENT_SERVICE_URL / BOOKING_SERVICE_URL / LISTING_SERVICE_URL /
+      # NOTIFICATION_SERVICE_URL / USER_SERVICE_URL / HANDOVER_SERVICE_URL /
+      # REVIEW_SERVICE_URL / MESSAGING_SERVICE_URL deliberately left unset — see
+      # KNOWN LIMITATION above.
+    depends_on:
+      temporal:
+        condition: service_healthy
+
+  # --- Outbox relay sidecars ---------------------------------------------------
+  # hiyar-outbox-relay has its own DATABASE_URL adoption issue/PR (open, unmerged
+  # as of this writing): https://github.com/Hiyar-Ltd/hiyar-outbox-relay/issues/18
+
+  user-service-outbox:
+    image: ${OUTBOX_RELAY_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/outbox-relay}:${OUTBOX_RELAY_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-outbox-relay
+    profiles: [backend, full]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://user_svc:user_svc@postgres:5432/hiyar?sslmode=disable&search_path=users
+      OUTBOX_SCHEMA: users
+      PUBSUB_PROJECT: hiyar-local
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  booking-service-outbox:
+    image: ${OUTBOX_RELAY_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/outbox-relay}:${OUTBOX_RELAY_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-outbox-relay
+    profiles: [backend, full]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://booking_svc:booking_svc@postgres:5432/hiyar?sslmode=disable&search_path=bookings
+      OUTBOX_SCHEMA: bookings
+      PUBSUB_PROJECT: hiyar-local
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  listing-service-outbox:
+    image: ${OUTBOX_RELAY_IMAGE:-australia-southeast1-docker.pkg.dev/hiyar-staging/containers/outbox-relay}:${OUTBOX_RELAY_TAG:-latest-known-good}
+    build:
+      context: ../hiyar-outbox-relay
+    profiles: [backend, full]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      HIYAR_ENV: local
+      DATABASE_URL: postgres://listing_svc:listing_svc@postgres:5432/hiyar?sslmode=disable&search_path=listings
+      OUTBOX_SCHEMA: listings
+      PUBSUB_PROJECT: hiyar-local
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
