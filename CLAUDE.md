@@ -21,7 +21,8 @@ Start only what a given service needs:
 | `gcs` | postgres, redis, gcs |
 | `gateway` | postgres, redis, firebase |
 | `observability` | otel-collector, jaeger |
-| `full` | everything |
+| `backend` | api-gateway + all 15 domain services with a working Dockerfile (see README.md "Full backend for client testing") |
+| `full` | everything, including `backend` |
 
 `.env.example` sets `COMPOSE_PROFILES=full`, so after `cp .env.example .env` the default is everything:
 
@@ -49,6 +50,19 @@ docker compose down -v             # tear down + delete volumes
 | OTel Collector (gRPC) | 4317 | gRPC |
 | OTel Collector (HTTP) | 4318 | HTTP |
 | Jaeger UI | 16686 | HTTP |
+| api-gateway | 8080 | HTTP |
+| user-service | 8081 | HTTP |
+| listing-service | 8082 | HTTP |
+| search-service | 8083 | HTTP |
+| booking-service | 8084 | HTTP |
+| handover-service | 8086 | HTTP |
+| review-service | 8087 | HTTP |
+| notification-service | 8089 | HTTP |
+| media-service | 8090 | HTTP |
+| payment-service | 8091 | HTTP |
+| messaging-service | 8092 | HTTP |
+| risk-service | 8093 | HTTP |
+| ai-service | 8094 | HTTP |
 
 ---
 
